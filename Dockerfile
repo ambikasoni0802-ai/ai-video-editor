@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# FFmpeg aur zaroori system libraries install karo
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libgl1 \
