@@ -72,6 +72,18 @@ Available actions:
 - watermark_text: {"action": "watermark_text", "text": string}
 - fade: {"action": "fade"}
 - brightness: {"action": "brightness", "level": number}  (-1 to 1, negative=dark, positive=bright)
+- stabilize: {"action": "stabilize"}  (shaky video ko smooth karna)
+- greenscreen: {"action": "greenscreen"}  (green background hatana/transparent karna)
+- face_blur: {"action": "face_blur"}  (chehra blur karna, privacy ke liye)
+- remove_silence: {"action": "remove_silence"}  (khaali/silent parts video se hatana)
+- color_grade: {"action": "color_grade", "style": string}  (style: "cinematic", "warm", "cool", "teal_orange")
+- crossfade_transition: {"action": "crossfade_transition"}  (smooth transition, sirf do videos hon tab)
+- sharpen: {"action": "sharpen"}  (video ko sharp/clear banana)
+- old_film: {"action": "old_film"}  (purani film jaisa scratches/grain effect)
+- reverse: {"action": "reverse"}  (video ulta chalana)
+- split_screen: {"action": "split_screen"}  (do videos ko side-by-side dikhana, sirf tab jab dusri video upload ho)
+- add_music: {"action": "add_music"}  (background music mix karna, sirf tab jab music file upload ho)
+- text_to_speech: {"action": "text_to_speech", "text": string}  (voiceover banana - text ko awaz mein badalna)
 
 User agar ek se zyada cheezein bole (jaise "cut karo aur text add karo"),
 toh multiple actions ki JSON list return karo.
@@ -183,6 +195,32 @@ def fallback_parse(instruction):
         actions.append({"action": "brightness", "level": 0.3})
     elif any(w in text for w in ["dark", "andhera"]):
         actions.append({"action": "brightness", "level": -0.3})
+    elif any(w in text for w in ["stabilize", "shake hatao", "smooth karo"]):
+        actions.append({"action": "stabilize"})
+    elif any(w in text for w in ["green screen", "greenscreen", "chroma"]):
+        actions.append({"action": "greenscreen"})
+    elif any(w in text for w in ["face blur", "chehra blur", "chehra chhupao"]):
+        actions.append({"action": "face_blur"})
+    elif any(w in text for w in ["silence hatao", "khaali", "chup"]):
+        actions.append({"action": "remove_silence"})
+    elif any(w in text for w in ["cinematic"]):
+        actions.append({"action": "color_grade", "style": "cinematic"})
+    elif any(w in text for w in ["warm", "garam"]):
+        actions.append({"action": "color_grade", "style": "warm"})
+    elif any(w in text for w in ["cool", "thanda"]):
+        actions.append({"action": "color_grade", "style": "cool"})
+    elif any(w in text for w in ["teal", "orange"]):
+        actions.append({"action": "color_grade", "style": "teal_orange"})
+    elif any(w in text for w in ["sharp", "clear karo"]):
+        actions.append({"action": "sharpen"})
+    elif any(w in text for w in ["old film", "purani film", "scratches"]):
+        actions.append({"action": "old_film"})
+    elif any(w in text for w in ["reverse", "ulta"]):
+        actions.append({"action": "reverse"})
+    elif any(w in text for w in ["split screen", "side by side"]):
+        actions.append({"action": "split_screen"})
+    elif any(w in text for w in ["music add", "background music", "gaana"]):
+        actions.append({"action": "add_music"})
 
     return actions
 
@@ -271,7 +309,7 @@ def format_timestamp(seconds):
 # Ek action ko video par apply karna (FFmpeg based)
 # ---------------------------------------------------------------
 
-def apply_single_action(video_path, action, progress=None):
+def apply_single_action(video_path, action, progress=None, extra_file=None):
     uid = uuid.uuid4().hex[:8]
     out_path = os.path.join(WORK_DIR, f"step_{uid}.mp4")
     name = action.get("action")
@@ -391,97 +429,59 @@ def apply_single_action(video_path, action, progress=None):
         cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", f"eq=brightness={level}", out_path]
         run_ffmpeg(cmd)
 
-    else:
-        return video_path  # koi change nahi
+    elif name == "stabilize":
+        # Do-pass stabilization (FFmpeg vidstab - free, built-in)
+        transform_file = os.path.join(WORK_DIR, f"transforms_{uid}.trf")
+        pass1 = ["ffmpeg", "-y", "-i", video_path, "-vf",
+                 f"vidstabdetect=shakiness=8:accuracy=9:result={transform_file}",
+                 "-f", "null", "-"]
+        run_ffmpeg(pass1)
+        pass2 = ["ffmpeg", "-y", "-i", video_path, "-vf",
+                 f"vidstabtransform=input={transform_file}:zoom=0:smoothing=15",
+                 out_path]
+        run_ffmpeg(pass2)
+        if os.path.exists(transform_file):
+            os.remove(transform_file)
 
-    return out_path
+    elif name == "greenscreen":
+        vf = "colorkey=0x00FF00:0.3:0.2,format=yuva420p"
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", vf, out_path]
+        run_ffmpeg(cmd)
 
+    elif name == "face_blur":
+        import cv2
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        temp_video = os.path.join(WORK_DIR, f"faceblur_{uid}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(temp_video, fourcc, fps, (w, h))
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.1, 5)
+            for (x, y, fw, fh) in faces:
+                roi = frame[y:y+fh, x:x+fw]
+                roi = cv2.GaussianBlur(roi, (35, 35), 0)
+                frame[y:y+fh, x:x+fw] = roi
+            writer.write(frame)
+            frame_idx += 1
+            if progress is not None and frame_idx % 10 == 0:
+                pass  # progress skip for speed
+        cap.release()
+        writer.release()
+        # Original audio wapas jodo
+        cmd = ["ffmpeg", "-y", "-i", temp_video, "-i", video_path,
+               "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0?",
+               "-shortest", out_path]
+        run_ffmpeg(cmd)
+        os.remove(temp_video)
 
-# ---------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------
-
-def apply_edit(video_path, instruction, progress=gr.Progress()):
-    if video_path is None:
-        return None, "Pehle ek video upload karo."
-
-    progress(0, desc="Instruction samajh raha hoon...")
-
-    actions = None
-    used_llm = False
-    if GROQ_API_KEY:
-        actions = understand_instruction_with_llm(instruction)
-        if actions:
-            used_llm = True
-
-    if not actions:
-        actions = fallback_parse(instruction)
-
-    if not actions:
-        return None, (
-            "Instruction samajh nahi aaya. Thoda clearly batao, jaise:\n"
-            "- 'background hatao' / 'subtitles add karo' / 'blur karo'\n"
-            "- 'pehle 10 second kaato' / 'text likho Hello'\n"
-            "- 'speed 2x karo' / 'vintage effect lagao' / 'zoom karo'"
-        )
-
-    current_video = video_path
-    total = len(actions)
-    try:
-        for idx, action in enumerate(actions):
-            def sub_progress(frac, desc=""):
-                overall = (idx + frac) / total
-                progress(overall, desc=desc or f"Step {idx+1}/{total}")
-            current_video = apply_single_action(current_video, action, progress=sub_progress)
-
-        engine = "Groq AI (LLM ne samjha)" if used_llm else "Keyword matching"
-        msg = f"Ho gaya! ({engine}) Actions apply hue: " + ", ".join(a["action"] for a in actions)
-        return current_video, msg
-
-    except Exception as e:
-        return None, f"Error aa gaya: {str(e)}"
-
-
-with gr.Blocks(title="AI Video Editor - High Level") as demo:
-    gr.Markdown("# 🎬 AI Video Editor (High-Level, Free & Open Source)")
-    if GROQ_API_KEY:
-        gr.Markdown("✅ **Smart mode ON** — kaisi bhi bhasha mein bolo, AI samjhega.")
-    else:
-        gr.Markdown(
-            "⚠️ **Basic mode** — abhi sirf fixed keywords samajhta hai. "
-            "Smart mode on karne ke liye `GROQ_API_KEY` environment variable set karo."
-        )
-
-    with gr.Row():
-        with gr.Column():
-            video_input = gr.Video(label="Video Upload Karo")
-            instruction_input = gr.Textbox(
-                label="Instruction Do (apni bhasha mein bolo)",
-                placeholder='Jaise: "background hatao aur subtitles bhi add kar do"',
-                lines=2
-            )
-            submit_btn = gr.Button("Edit Karo", variant="primary")
-
-        with gr.Column():
-            video_output = gr.File(label="Edited Output")
-            status_output = gr.Textbox(label="Status", interactive=False, lines=3)
-
-    submit_btn.click(
-        fn=apply_edit,
-        inputs=[video_input, instruction_input],
-        outputs=[video_output, status_output]
-    )
-
-    gr.Markdown(
-        "### Yeh sab kar sakta hai\n"
-        "Background remove • Subtitles • Trim • Text overlay • Speed • Mute • "
-        "GIF • Audio extract • Black&white • Blur • Vintage • Vignette • Zoom • "
-        "Rotate • Square crop • Watermark • Fade in/out • Brightness\n\n"
-        "**Ek saath multiple bhi bol sakte ho** (Smart mode mein): "
-        "*'pehle 5 second kaato, phir subtitles add karo aur vintage effect lagao'*"
-    )
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
-  
+    elif name == "remove_silence":
+        vf_af = "silenceremove=start_periods=1:star
