@@ -484,4 +484,5 @@ def apply_single_action(video_path, action, progress=None, extra_file=None):
         os.remove(temp_video)
 
     elif name == "remove_silence":
-        vf_af = "silenceremove=start_periods=1:star
+        vf_af = (
+            "silenceremove=start_
